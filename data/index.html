@@ -1,0 +1,157 @@
+<!DOCTYPE HTML>
+<html>
+<head>
+  <title>ESP32 CANViewer</title>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
+  <style>
+    html {
+      font-family: Arial, Helvetica, sans-serif;
+      text-align: center;
+    }
+  </style>
+</head>
+<body onload="initWebSocket();">
+  <center>
+  <div class="topnav">
+    <h1>ESP32 CANViewer</h1>
+  </div>
+  <div>
+    <div id="statusdiv">
+      <span id="connectiondisplay"></span>
+    </div>
+    <div id="canTable"></div>
+  </div>
+  </center>
+<script>
+  var gateway = 'ws://'+window.location.hostname+':1337/';
+  //var gateway = 'ws://192.168.178.120:1337/';
+  var websocket;
+
+  var statusTimer = 0;
+  var reconnectTimer = 0;
+  var updateTimer = 0;
+
+  function initWebSocket() {
+    console.log('Trying to open a WebSocket connection...');
+    websocket = new WebSocket(gateway);
+    websocket.onopen    = onOpen;
+    websocket.onclose   = onClose;
+    websocket.onmessage = onMessage;
+  }
+  
+  function onOpen(event) {
+    console.log('Connection opened');
+    clearTimeout(reconnectTimer);
+    updateTimer = setTimeout(updateTable, 1000);
+    document.getElementById('connectiondisplay').innerHTML = "CONNECTED";
+  }
+
+  function onClose(event) {
+    console.log('Connection closed');
+    clearTimeout(updateTimer);
+    document.getElementById('connectiondisplay').innerHTML = "DISCONNECTED";
+    reconnectTimer = setTimeout(initWebSocket, 2000);
+  }
+  
+  function onMessage(event) {
+    //console.log(event.data);
+    var obj = JSON.parse(event.data);
+    if(obj.type == "STATUS"){
+      clearTimeout(statusTimer);
+      statusTimer = setTimeout(function(){
+        console.log('Status Timeout!');
+        websocket.close();
+        document.getElementById('connectiondisplay').innerHTML = "DISCONNECTED";
+      }, 3000);
+      document.getElementById('connectiondisplay').innerHTML = "CONNECTED </br> Speed: " + obj.baudrate.toString(); 
+      if(obj.filterId != -1){
+        document.getElementById('connectiondisplay').innerHTML += " - FilterID: 0x" + obj.filterId.toString(16) + " - FilterMask: 0x" + obj.filterMask.toString(16);
+      }else{
+        document.getElementById('connectiondisplay').innerHTML += " - Filter not set!";
+      }
+    }else if(obj.type == "STD" || obj.type == "EXT" | obj.type == "RTR" | obj.type == "ERTR"){
+      handleCANPacket(obj);
+    }else{
+      console.log('[UNHANDLED]:' + event.data);
+    }
+
+  }
+
+  var canDB = {};
+
+  function handleCANPacket(obj){
+    if(canDB.hasOwnProperty(obj.id)){
+      var prevElem = canDB[obj.id];
+      canDB[obj.id] = obj;
+      canDB[obj.id].interval = canDB[obj.id].ts - prevElem.ts;
+    }else{
+      canDB[obj.id] = obj;  
+      canDB[obj.id].interval = 0;
+    }
+    canDB[obj.id].lastReceivedTS = Date.now();
+  }
+
+  function setFilter(id, mask){
+    temp = {};
+    temp.cmd = "SETFILTER";
+    temp.id = id;
+    temp.mask = mask;
+    websocket.send(JSON.stringify(temp));
+  }
+
+  function setSpeed(speed){
+    temp = {};
+    temp.cmd = "SETSPEED";
+    temp.speed = speed;
+    websocket.send(JSON.stringify(temp));
+  }
+
+  function sendPacket(id, data){
+    if(data.length <= 8){
+      temp = {};
+      temp.cmd = "SEND";
+      temp.id = id;
+      temp.dlc = data.length;
+      temp.data = data;
+      websocket.send(JSON.stringify(temp));
+    }else{
+      console.log("Packet too big!");
+    }
+  }
+
+  function updateTable(){
+    var htmlout = "";
+    var currentTS = Date.now();
+    if(Object.keys(canDB).length === 0 && canDB.constructor === Object){
+      htmlout += "No packets received so far!";
+    }else{
+      htmlout = "<table border=\"1\">\n";
+      htmlout += "<tr><th>ID</th><th>TYPE</th><th>LEN</th><th>INTERVAL</th><th>DATA</th></tr>";
+      for (var canElemKey in canDB){
+        var canElem = canDB[canElemKey];
+        var timediff = currentTS - canElem.lastReceivedTS;
+        var rowcolor = "rgb(0,0,0)";
+        if(timediff > 2000) rowcolor = "rgb(50,50,50)";
+        if(timediff > 3000) rowcolor = "rgb(100,100,100)";
+        if(timediff > 4000) rowcolor = "rgb(150,150,150)";
+        if(timediff > 5000) rowcolor = "rgb(200,200,200)";
+        htmlout += "<tr style=\"color:"+rowcolor+"\"><td>0x"+canElem.id.toString(16)+"</td><td>"+canElem.type.toString()+"</td><td>"+canElem.dlc.toString()+"</td><td>"+canElem.interval.toString()+"</td><td>";
+        if(canElem.type == "STD" || canElem.type == "EXT"){
+          var canData = canElem.data;
+          for(var i=0; i<canData.length; i++){
+            htmlout += "0x"+canData[i].toString(16);
+            if(i < canData.length-1) htmlout += ", ";
+          }
+        }
+        htmlout += "</td></tr>\n";
+      }
+      htmlout += "</table>\n";
+    }
+    document.getElementById('canTable').innerHTML = htmlout;
+    updateTimer = setTimeout(updateTable, 100);
+  }
+</script>
+</body>
+</html>
